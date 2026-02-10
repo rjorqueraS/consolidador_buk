@@ -11,7 +11,7 @@ from dateutil import parser as dtparser
 from datetime import datetime, time
 
 
-# ------- Equivalencias de encabezados (insensible a tildes, mayúsculas, espacios y signos) -------
+# ------- Equivalencias de encabezados -------
 EQUIV: Dict[str, List[str]] = {
     "rut": [
         "rut", "run", "r.u.t", "r.u.n", "documento", "doc", "id", "dni",
@@ -36,7 +36,7 @@ EQUIV: Dict[str, List[str]] = {
         "rut razón social", "rut de la empresa", "rut del empleador"
     ],
 
-    # Fechas/horas (para robustez; no se exportan)
+    # (no se exportan, solo por robustez)
     "fecha": ["fecha", "dia", "día", "fecha jornada", "f asistencia"],
     "entrada": ["entrada", "hora entrada", "ingreso", "checkin", "h.entrada"],
     "salida": ["salida", "hora salida", "egreso", "checkout", "h.salida"],
@@ -119,7 +119,6 @@ _RUT_DIGITS = re.compile(r"[.\-]")
 
 
 def normalize_rut_str(rut_str: Optional[str], dv_str: Optional[str] = None) -> Optional[str]:
-    """Normaliza RUT a 'XXXXXXXX-D' cuando es posible; si no hay DV, devuelve solo el cuerpo numérico."""
     if rut_str is None and dv_str is None:
         return None
     if rut_str is None:
@@ -148,7 +147,6 @@ def normalize_rut_str(rut_str: Optional[str], dv_str: Optional[str] = None) -> O
 
 
 def rut_group_key(rut_normalizado: Optional[str], nombre: Optional[str]) -> Optional[str]:
-    """Clave de agrupación: prioriza RUT (solo números), y si no hay, usa nombre normalizado."""
     if rut_normalizado:
         return rut_normalizado.split("-")[0]
     if nombre:
@@ -156,7 +154,6 @@ def rut_group_key(rut_normalizado: Optional[str], nombre: Optional[str]) -> Opti
     return None
 
 
-# --------- Lectura y procesamiento ---------
 def process_sheet(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
@@ -176,6 +173,7 @@ def process_sheet(df: pd.DataFrame) -> pd.DataFrame:
 
     out = pd.DataFrame()
     out["rut"] = None
+
     if rut_col:
         out["rut"] = [
             normalize_rut_str(r, df[dv_col].iloc[i] if dv_col else None)
@@ -188,7 +186,6 @@ def process_sheet(df: pd.DataFrame) -> pd.DataFrame:
     out["supervisor"] = df[sup_col].apply(clean_text) if sup_col else None
     out["rut_empleador"] = [normalize_rut_str(x) for x in df[rut_emp_col]] if rut_emp_col else None
 
-    # Filtrado mínimo: conservar filas con RUT o Nombre
     out = out[(out["rut"].notna()) | (out["nombre"].notna())]
     if out.empty:
         return pd.DataFrame()
@@ -202,28 +199,53 @@ def process_sheet(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def process_excel_bytes(file_bytes: bytes, filename: str) -> Tuple[pd.DataFrame, List[str]]:
+def _sniff_excel_kind(file_bytes: bytes, filename: str) -> str:
     """
-    Lee .xls y .xlsx desde bytes (Streamlit uploader).
-    - .xlsx: openpyxl
-    - .xls: xlrd (requiere xlrd==1.2.0 en requirements.txt)
+    Devuelve 'xlsx' o 'xls' intentando adivinar por firma.
+    - xlsx es zip: comienza con b'PK'
+    - xls clásico es OLE2: comienza con D0 CF 11 E0
     """
-    logs: List[str] = []
+    head = file_bytes[:8]
+    if head.startswith(b"PK"):
+        return "xlsx"
+    if head.startswith(b"\xD0\xCF\x11\xE0"):
+        return "xls"
+
+    # fallback por extensión si la firma no ayudó
     ext = os.path.splitext(filename)[1].lower()
+    if ext == ".xlsx":
+        return "xlsx"
+    if ext == ".xls":
+        return "xls"
+    return "unknown"
 
+
+def process_excel_bytes(file_bytes: bytes, filename: str) -> Tuple[pd.DataFrame, List[str]]:
+    logs: List[str] = []
+    kind = _sniff_excel_kind(file_bytes, filename)
+
+    # Elegimos engine por tipo real
+    if kind == "xlsx":
+        engine = "openpyxl"
+    elif kind == "xls":
+        engine = "xlrd"
+    else:
+        return pd.DataFrame(), [f"[ERROR] Formato no soportado: {filename}"]
+
+    # Leer workbook
     try:
-        if ext == ".xlsx":
-            engine = "openpyxl"
-        elif ext == ".xls":
-            engine = "xlrd"
-        else:
-            return pd.DataFrame(), [f"[ERROR] Formato no soportado: {filename}"]
-
         xls = pd.ExcelFile(BytesIO(file_bytes), engine=engine)
         sheets = xls.sheet_names
-
     except Exception as e:
-        return pd.DataFrame(), [f"[ERROR] No se pudo abrir {filename}: {e}"]
+        # fallback: si venía mal renombrado, intentamos el otro engine
+        try:
+            alt_engine = "xlrd" if engine == "openpyxl" else "openpyxl"
+            xls = pd.ExcelFile(BytesIO(file_bytes), engine=alt_engine)
+            sheets = xls.sheet_names
+            engine = alt_engine
+            logs.append(f"[AVISO] {filename}: se detectó extensión engañosa, se leyó con '{engine}'.")
+        except Exception as e2:
+            return pd.DataFrame(), [f"[ERROR] No se pudo abrir {filename}: {e2}"]
 
     parts = []
     for sh in sheets:
@@ -262,7 +284,6 @@ def build_output_excel(agg: pd.DataFrame, logs: List[str]) -> bytes:
 def run_app():
     st.set_page_config(page_title="Consolidado Asistencia", layout="wide")
     st.title("📋 Consolidado de Asistencia (Excel)")
-
     st.write("Sube uno o varios archivos **.xls** o **.xlsx**. La app consolida a 1 fila por RUT (o nombre si no hay RUT) y cuenta marcas.")
 
     uploaded = st.file_uploader(
@@ -290,8 +311,7 @@ def run_app():
 
         if not chunks:
             st.error("No se consolidó ninguna fila. Revisa el log.")
-            if logs:
-                st.text_area("Log", "\n".join(logs), height=260)
+            st.text_area("Log", "\n".join(logs), height=280)
             return
 
         raw = pd.concat(chunks, ignore_index=True)
@@ -324,7 +344,7 @@ def run_app():
         )
 
         if logs:
-            st.text_area("Log", "\n".join(logs), height=260)
+            st.text_area("Log", "\n".join(logs), height=280)
 
 
 if __name__ == "__main__":
