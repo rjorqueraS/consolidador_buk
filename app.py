@@ -252,7 +252,7 @@ def run_app():
 
     uploaded = st.file_uploader(
         "Subir archivos de asistencia",
-        type=["xlsx"],  # si quieres permitir xls, lo podemos intentar, pero suele fallar en cloud
+        type=["xls","xlsx"],  # si quieres permitir xls, lo podemos intentar, pero suele fallar en cloud
         accept_multiple_files=True
     )
 
