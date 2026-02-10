@@ -3,3 +3,4 @@ pandas
 openpyxl
 python-dateutil
 Unidecode
+xlrd==1.2.0
