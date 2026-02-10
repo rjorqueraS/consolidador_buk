@@ -251,9 +251,10 @@ def run_app():
     st.write("Sube uno o varios archivos **.xlsx**. La app consolida a 1 fila por RUT (o nombre si no hay RUT) y cuenta marcas.")
 
     uploaded = st.file_uploader(
-        "Subir archivos de asistencia",
-        type=["xls","xlsx"],  # si quieres permitir xls, lo podemos intentar, pero suele fallar en cloud
-        accept_multiple_files=True
+    "Subir archivos de asistencia",
+    type=["xls", "xlsx"],
+    accept_multiple_files=True
+)
     )
 
     if not uploaded:
