@@ -1,3 +1,4 @@
+# app.py
 import os
 import re
 from io import BytesIO
@@ -18,6 +19,7 @@ EQUIV: Dict[str, List[str]] = {
     ],
     "dv": ["dv", "digito verificador", "d.v", "digito", "dígito"],
     "nombre": ["nombre", "nombres", "trabajador", "colaborador", "empleado", "persona", "nombre trabajador"],
+
     "especialidad": [
         "especialidad", "especialización", "especialidad laboral", "oficio", "perfil", "cargo",
         "puesto", "ocupacion", "ocupación"
@@ -33,6 +35,8 @@ EQUIV: Dict[str, List[str]] = {
         "rut empleador", "rut empresa", "rut contratista", "rut contratante", "rut razon social",
         "rut razón social", "rut de la empresa", "rut del empleador"
     ],
+
+    # Fechas/horas (para robustez; no se exportan)
     "fecha": ["fecha", "dia", "día", "fecha jornada", "f asistencia"],
     "entrada": ["entrada", "hora entrada", "ingreso", "checkin", "h.entrada"],
     "salida": ["salida", "hora salida", "egreso", "checkout", "h.salida"],
@@ -152,6 +156,7 @@ def rut_group_key(rut_normalizado: Optional[str], nombre: Optional[str]) -> Opti
     return None
 
 
+# --------- Lectura y procesamiento ---------
 def process_sheet(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
@@ -176,12 +181,14 @@ def process_sheet(df: pd.DataFrame) -> pd.DataFrame:
             normalize_rut_str(r, df[dv_col].iloc[i] if dv_col else None)
             for i, r in enumerate(df[rut_col])
         ]
+
     out["nombre"] = df[nombre_col].apply(clean_text) if nombre_col else None
     out["especialidad"] = df[esp_col].apply(clean_text) if esp_col else None
     out["contrato"] = df[contrato_col].apply(clean_text) if contrato_col else None
     out["supervisor"] = df[sup_col].apply(clean_text) if sup_col else None
     out["rut_empleador"] = [normalize_rut_str(x) for x in df[rut_emp_col]] if rut_emp_col else None
 
+    # Filtrado mínimo: conservar filas con RUT o Nombre
     out = out[(out["rut"].notna()) | (out["nombre"].notna())]
     if out.empty:
         return pd.DataFrame()
@@ -196,24 +203,32 @@ def process_sheet(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def process_excel_bytes(file_bytes: bytes, filename: str) -> Tuple[pd.DataFrame, List[str]]:
+    """
+    Lee .xls y .xlsx desde bytes (Streamlit uploader).
+    - .xlsx: openpyxl
+    - .xls: xlrd (requiere xlrd==1.2.0 en requirements.txt)
+    """
     logs: List[str] = []
     ext = os.path.splitext(filename)[1].lower()
 
-    # Streamlit Cloud normalmente no soporta bien .xls (xlrd ya no lee xls sin extras).
-    # Si necesitas .xls, hay que convertirlos a .xlsx antes o usar una lib extra (riesgoso).
-    if ext == ".xls":
-        return pd.DataFrame(), [f"[ERROR] {filename}: formato .xls no soportado en esta app. Convierte a .xlsx."]
-
     try:
-        xls = pd.ExcelFile(BytesIO(file_bytes), engine="openpyxl")
+        if ext == ".xlsx":
+            engine = "openpyxl"
+        elif ext == ".xls":
+            engine = "xlrd"
+        else:
+            return pd.DataFrame(), [f"[ERROR] Formato no soportado: {filename}"]
+
+        xls = pd.ExcelFile(BytesIO(file_bytes), engine=engine)
         sheets = xls.sheet_names
+
     except Exception as e:
         return pd.DataFrame(), [f"[ERROR] No se pudo abrir {filename}: {e}"]
 
     parts = []
     for sh in sheets:
         try:
-            df = pd.read_excel(BytesIO(file_bytes), sheet_name=sh, engine="openpyxl")
+            df = pd.read_excel(BytesIO(file_bytes), sheet_name=sh, engine=engine)
             part = process_sheet(df)
             if not part.empty:
                 parts.append(part)
@@ -248,13 +263,12 @@ def run_app():
     st.set_page_config(page_title="Consolidado Asistencia", layout="wide")
     st.title("📋 Consolidado de Asistencia (Excel)")
 
-    st.write("Sube uno o varios archivos **.xlsx**. La app consolida a 1 fila por RUT (o nombre si no hay RUT) y cuenta marcas.")
+    st.write("Sube uno o varios archivos **.xls** o **.xlsx**. La app consolida a 1 fila por RUT (o nombre si no hay RUT) y cuenta marcas.")
 
     uploaded = st.file_uploader(
-    "Subir archivos de asistencia",
-    type=["xls", "xlsx"],
-    accept_multiple_files=True
-)
+        "Subir archivos de asistencia",
+        type=["xls", "xlsx"],
+        accept_multiple_files=True
     )
 
     if not uploaded:
@@ -267,8 +281,7 @@ def run_app():
 
         with st.spinner("Procesando archivos..."):
             for uf in uploaded:
-                file_bytes = uf.getvalue()
-                df, l = process_excel_bytes(file_bytes, uf.name)
+                df, l = process_excel_bytes(uf.getvalue(), uf.name)
                 logs.extend(l)
                 if not df.empty:
                     chunks.append(df)
@@ -278,7 +291,7 @@ def run_app():
         if not chunks:
             st.error("No se consolidó ninguna fila. Revisa el log.")
             if logs:
-                st.text_area("Log", "\n".join(logs), height=240)
+                st.text_area("Log", "\n".join(logs), height=260)
             return
 
         raw = pd.concat(chunks, ignore_index=True)
@@ -302,7 +315,6 @@ def run_app():
         st.success(f"✅ Listo: {len(agg)} trabajadores; {raw.shape[0]} marcas")
         st.dataframe(agg[OUT_COLS], use_container_width=True)
 
-        # Descarga Excel
         excel_bytes = build_output_excel(agg, logs)
         st.download_button(
             "⬇️ Descargar consolidado_asistencia.xlsx",
@@ -312,7 +324,7 @@ def run_app():
         )
 
         if logs:
-            st.text_area("Log", "\n".join(logs), height=240)
+            st.text_area("Log", "\n".join(logs), height=260)
 
 
 if __name__ == "__main__":
