@@ -1,6 +1,5 @@
 streamlit
 pandas
 openpyxl
-python-dateutil
-Unidecode
-xlrd==2.0.1
+xlrd
+unidecode
